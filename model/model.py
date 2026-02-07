@@ -29,6 +29,7 @@ import numpy as np
 from agents.BankAgent import BankAgent, IntentFactory
 from agents.CCPAgent import CCPAgent
 from agents.redis_state import RedisStateManager
+from agents.neo4j_state import Neo4jStateManager
 
 # All possible bank action types
 ACTION_TYPES = [
@@ -97,8 +98,77 @@ class FinancialNetworkModel(ap.Model):
         for bank in self.banks:
             bank.init_neighbor_data()
 
-        # ── Redis state layer ────────────────────────────────────────────
-        self.redis = RedisStateManager(use_fake=True)
+        # ── Redis state layer (try cloud → local → fakeredis) ─────────
+        redis_ok = False
+        redis_host = self.p.get("redis_host", "localhost")
+        redis_port = self.p.get("redis_port", 6379)
+        if not self.p.get("redis_use_fake", False):
+            # attempt cloud / specified Redis
+            try:
+                self.redis = RedisStateManager(
+                    use_fake=False,
+                    host=redis_host,
+                    port=redis_port,
+                    db=self.p.get("redis_db", 0),
+                    username=self.p.get("redis_username"),
+                    password=self.p.get("redis_password"),
+                )
+                self.redis._r.ping()           # verify connection
+                redis_ok = True
+                print(f"  ✓ Redis connected: {redis_host}:{redis_port}")
+            except Exception as e:
+                print(f"  ✗ Cloud Redis failed ({e}), trying localhost...")
+                # fallback to local Redis
+                try:
+                    self.redis = RedisStateManager(
+                        use_fake=False, host="localhost", port=6379, db=0,
+                    )
+                    self.redis._r.ping()
+                    redis_ok = True
+                    print("  ✓ Redis connected: localhost:6379 (fallback)")
+                except Exception as e2:
+                    print(f"  ✗ Local Redis also failed ({e2}), using fakeredis")
+        if not redis_ok:
+            self.redis = RedisStateManager(use_fake=True)
+            print("  ✓ Using fakeredis (in-memory)")
+        self.redis.flush()                    # clean slate each run
+        self.redis.set_market_depth(
+            self.p.get("market_depth", 200.0)
+        )
+
+        # ── Neo4j graph persistence (optional — skip if unreachable) ──
+        neo4j_uri = self.p.get("neo4j_uri", "")
+        self.neo4j = None
+        if neo4j_uri:
+            try:
+                _neo = Neo4jStateManager(
+                    uri=neo4j_uri,
+                    user=self.p.get("neo4j_user", "neo4j"),
+                    password=self.p.get("neo4j_password", ""),
+                )
+                _neo._driver.verify_connectivity()  # fast check
+                _neo.ensure_constraints()
+                _neo.init_run(dict(self.p))
+                _neo.create_bank_nodes(list(range(n)))
+                _neo.create_ccp_node()
+                # persist initial network edges
+                edges = []
+                for bank in self.banks:
+                    for nbr_id, exp in bank.exposure_to_neighbors.items():
+                        nbr_bank = next(
+                            (b for b in self.banks if b.id == nbr_id), None
+                        )
+                        if nbr_bank is not None:
+                            edges.append(
+                                (bank.bank_index, nbr_bank.bank_index, round(exp, 2))
+                            )
+                if edges:
+                    _neo.create_edges(edges)
+                self.neo4j = _neo
+                print(f"  ✓ Neo4j connected: {neo4j_uri}")
+            except Exception as e:
+                print(f"  ✗ Neo4j unavailable ({e}), skipping graph persistence")
+                self.neo4j = None
 
         # ── CCP agent (game-theoretic strategic actor) ───────────────────
         self.ccp = CCPAgent(model=self, params=dict(self.p))
@@ -142,6 +212,9 @@ class FinancialNetworkModel(ap.Model):
 
         # 5. Record metrics
         self._record_metrics(n_calls)
+
+        # 6. Persist tick to Neo4j (if connected)
+        self._persist_tick_to_neo4j(n_calls)
 
     # ─────────────────────────────────────────── publish to Redis
     def _publish_to_redis(self):
@@ -218,14 +291,56 @@ class FinancialNetworkModel(ap.Model):
         if shock_step is None or self.t != shock_step:
             return
         intensity = self.p.get("shock_intensity", 0.3)
+        fraction = self.p.get("shock_fraction", 0.3)
         for bank in self.banks:
             if bank.defaulted:
                 continue
-            if self.random.random() < 0.6:
+            if self.random.random() < fraction:
                 drain = bank.liquidity * intensity
                 bank.liquidity -= drain
                 bank.capital -= drain * 0.8
                 bank.stressed = True
+
+    # ─────────────────────────────────────────── neo4j tick persist
+    def _persist_tick_to_neo4j(self, n_margin_calls: int = 0) -> None:
+        """Write this tick's state to Neo4j (if connected)."""
+        if self.neo4j is None:
+            return
+
+        tick = self.t
+        self.neo4j.create_tick(tick)
+
+        # bank states
+        for bank in self.banks:
+            self.neo4j.record_bank_state(tick, bank.bank_index, {
+                "liquidity": round(bank.liquidity, 2),
+                "capital": round(bank.capital, 2),
+                "exposure": round(sum(bank.exposure_to_neighbors.values()), 2),
+                "assets": round(sum(bank.assets.values()), 2),
+                "stressed": bank.stressed,
+                "defaulted": bank.defaulted,
+            })
+            # record intents emitted this tick
+            if bank.last_intent and bank.last_intent.tick == tick:
+                self.neo4j.record_intent(bank.last_intent.to_dict())
+
+        # CCP state
+        ccp_idx = len(self.ccp.utility_history) - 1
+        if ccp_idx >= 0:
+            self.neo4j.record_ccp_state(tick, {
+                "utility": self.ccp.utility_history[ccp_idx],
+                "margin_rate": self.ccp.margin_rate_history[ccp_idx],
+                "panic_mode": self.ccp.panic_mode_history[ccp_idx],
+                "default_fund": self.ccp.default_fund_history[ccp_idx],
+                "fire_sale_volume": self.ccp.fire_sale_history[ccp_idx],
+            })
+
+        # record defaults that happened this tick
+        for bank in self.banks:
+            if bank.defaulted and bank.last_intent and \
+               bank.last_intent.tick == tick and \
+               bank.last_intent.action_type == "DECLARE_DEFAULT":
+                self.neo4j.record_default(tick, bank.bank_index)
 
     # ─────────────────────────────────────────── metrics
     def _record_metrics(self, n_margin_calls: int = 0):
@@ -278,14 +393,11 @@ class FinancialNetworkModel(ap.Model):
         self._ts_actions.append(action_counts)
         self._ts_margin_calls_issued.append(n_margin_calls)
 
-        # default-fund: CCP centralised fund + per-bank contributions
-        total_dfund_banks = sum(b.default_fund_contribution for b in live)
+        # default-fund: CCP centralised fund (already includes bank deposits)
         total_ib_loans = sum(
             len(b.interbank_loans_given) for b in live
         )
-        self._ts_default_fund.append(
-            self.ccp.default_fund + total_dfund_banks
-        )
+        self._ts_default_fund.append(self.ccp.default_fund)
         self._ts_interbank_loans.append(total_ib_loans)
 
         self.record("n_defaulted", n_defaulted)
@@ -299,6 +411,21 @@ class FinancialNetworkModel(ap.Model):
         self.report("total_defaults",
                      self._ts_defaults[-1] if self._ts_defaults else 0)
         self.report("total_freeze_events", sum(self._ts_freeze_events))
+        # Finalize Neo4j run with summary
+        if self.neo4j is not None:
+            m = self.metrics
+            self.neo4j.finalize_run({
+                "final_defaults": m["defaults"][-1] if m["defaults"] else 0,
+                "final_active": m["active"][-1] if m["active"] else 0,
+                "final_liquidity": m["liquidity"][-1] if m["liquidity"] else 0,
+                "freeze_events": sum(m["freeze_events"]),
+                "ccp_final_utility": m["ccp_utility"][-1] if m["ccp_utility"] else 0,
+                "ccp_final_fund": m["ccp_default_fund"][-1] if m["ccp_default_fund"] else 0,
+                "total_margin_calls": sum(m["margin_calls_issued"]),
+            })
+            self.neo4j.close()
+        # Clean up Redis keys so the next run starts fresh
+        self.redis.flush()
 
     # ─────────────────────────────────────────── accessors
     @property

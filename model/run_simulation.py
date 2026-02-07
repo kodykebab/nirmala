@@ -14,6 +14,10 @@ matching 11 JSON schemas across two batches:
 
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()  # loads .env from current dir or parent
+
 from model import FinancialNetworkModel
 from visualization import (
     plot_bank_status,
@@ -21,6 +25,7 @@ from visualization import (
     plot_belief_evolution,
     plot_action_distribution,
     plot_network_snapshot,
+    plot_ccp_dashboard,
 )
 
 
@@ -30,45 +35,60 @@ def main():
         "n_banks": 10,
         "network_type": "erdos_renyi",
         "er_prob": 0.35,
-        "steps": 50,
+        "steps": 250,
 
         # bank initial state ranges
-        "init_liquidity_lo": 50,
-        "init_liquidity_hi": 140,
-        "init_capital_lo": 60,
-        "init_capital_hi": 180,
-        "init_liquid_bond_lo": 20,
-        "init_liquid_bond_hi": 80,
-        "init_illiquid_lo": 10,
-        "init_illiquid_hi": 50,
+        "init_liquidity_lo": 80,        # moderate starting runway
+        "init_liquidity_hi": 200,
+        "init_capital_lo": 100,
+        "init_capital_hi": 250,
+        "init_liquid_bond_lo": 40,
+        "init_liquid_bond_hi": 120,
+        "init_illiquid_lo": 20,
+        "init_illiquid_hi": 60,
 
         # risk / stress params
-        "stress_threshold": 30,
-        "min_liquidity": 25,
-        "step_operating_cost": 2.0,
+        "stress_threshold": 25,
+        "min_liquidity": 15,
+        "step_operating_cost": 0.5,
 
         # CCP params (simulated)
-        "margin_rate": 0.10,
+        "margin_rate": 0.5,
         "margin_call_threshold": 0.5,
-        "default_fund_rate": 0.05,   # fraction of liq deposited per DEPOSIT_DEFAULT_FUND
+        "default_fund_rate": 0.02,      # was 0.05 — less upfront drain
 
         # CCP agent params (game-theoretic)
-        "ccp_initial_default_fund": 100.0,   # starting centralised fund
-        "ccp_base_margin": 0.05,             # base margin rate
-        "ccp_margin_sensitivity": 0.01,      # volatility * this added to margin
-        "ccp_safe_multiplier": 10.0,         # panic when exposure > fund * this
-        "ccp_w1": 0.4,                       # utility weight: stability
-        "ccp_w2": 0.3,                       # utility weight: fund preservation
-        "ccp_w3": 0.2,                       # utility weight: cascade prevention
-        "ccp_w4": 0.1,                       # utility weight: market stress
+        "ccp_initial_default_fund": 100.0,
+        "ccp_base_margin": 0.05,
+        "ccp_margin_sensitivity": 0.01,
+        "ccp_safe_multiplier": 10.0,
+        "ccp_w1": 0.4,
+        "ccp_w2": 0.3,
+        "ccp_w3": 0.2,
+        "ccp_w4": 0.1,
+
+        # Redis connection (cloud RedisLabs — loaded from .env)
+        "redis_use_fake": False,
+        "redis_host": os.getenv("REDIS_HOST", "localhost"),
+        "redis_port": int(os.getenv("REDIS_PORT", "6379")),
+        "redis_db": 0,
+        "redis_username": os.getenv("REDIS_USERNAME"),
+        "redis_password": os.getenv("REDIS_PASSWORD"),
+
+        # Neo4j Aura (loaded from .env)
+        "neo4j_uri": os.getenv("NEO4J_URI", ""),
+        "neo4j_user": os.getenv("NEO4J_USER", "neo4j"),
+        "neo4j_password": os.getenv("NEO4J_PASSWORD", ""),
 
         # market params (simulated exchange)
         "base_volatility": 0.20,
-        "vol_shock_step": 15,          # volatility spike at step 15
+        "vol_shock_step": 15,
+        "market_depth": 400.0,
 
         # exogenous shock
-        "shock_step": 10,
-        "shock_intensity": 0.5,
+        "shock_step": 100,
+        "shock_intensity": 0.30,         # meaningful shock
+        "shock_fraction": 0.5,           # half the banks hit
 
         "seed": 99,
     }
@@ -83,6 +103,12 @@ def main():
     print("\n" + "=" * 70)
     print("  BANK-AGENT SIMULATION SUMMARY  (11-schema intents)")
     print("=" * 70)
+    print(f"  Redis                : {parameters.get('redis_host', 'localhost')}"
+          f":{parameters.get('redis_port', 6379)}")
+    neo_uri = parameters.get("neo4j_uri", "")
+    if neo_uri and model.neo4j:
+        print(f"  Neo4j                : {neo_uri}")
+        print(f"  Neo4j run_id         : {model.neo4j._run_id}")
     print(f"  Banks                : {parameters['n_banks']}")
     print(f"  Timesteps            : {parameters['steps']}")
     print(f"  Final defaults       : {m['defaults'][-1]}")
@@ -145,6 +171,7 @@ def main():
                              save_path=os.path.join(out, "action_distribution.png"))
     plot_network_snapshot(model,
                           save_path=os.path.join(out, "network_snapshot.png"))
+    plot_ccp_dashboard(m, save_path=os.path.join(out, "ccp_dashboard.png"))
     print(f"  Plots saved to {out}/\n")
 
 

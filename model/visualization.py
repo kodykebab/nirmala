@@ -208,3 +208,73 @@ def plot_network_snapshot(model, save_path: str | None = None):
     if save_path:
         fig.savefig(save_path, dpi=150)
     plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. CCP dashboard (utility, margin rate, panic mode, default fund)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_ccp_dashboard(metrics: dict, save_path: str | None = None):
+    """4-panel CCP agent dashboard: utility, margin rate, panic mode, fund."""
+    ccp_util = metrics.get("ccp_utility", [])
+    ccp_mr = metrics.get("ccp_margin_rate", [])
+    ccp_panic = metrics.get("ccp_panic_mode", [])
+    ccp_fund = metrics.get("ccp_default_fund", [])
+    ccp_fire = metrics.get("ccp_fire_sale_volume", [])
+
+    if not ccp_util:
+        return
+
+    steps = range(1, len(ccp_util) + 1)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+
+    # ── Panel A: CCP Utility ────────────────────────────────────────────
+    ax = axes[0, 0]
+    ax.plot(steps, ccp_util, color="darkblue", lw=2)
+    ax.axhline(0, color="gray", ls="--", lw=0.8, alpha=0.5)
+    ax.set_title("CCP Utility (Game-Theoretic Objective)")
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel("Utility")
+    ax.grid(True, alpha=0.3)
+
+    # ── Panel B: Dynamic Margin Rate ────────────────────────────────────
+    ax = axes[0, 1]
+    ax.plot(steps, ccp_mr, color="teal", lw=2)
+    ax.set_title("CCP Dynamic Margin Rate")
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel("Margin Rate")
+    ax.grid(True, alpha=0.3)
+    # shade panic mode ticks
+    for t, panic in enumerate(ccp_panic):
+        if panic:
+            ax.axvspan(t + 0.5, t + 1.5, color="red", alpha=0.15)
+    if any(ccp_panic):
+        panic_patch = mpatches.Patch(color="red", alpha=0.25,
+                                     label="Panic mode")
+        handles, _ = ax.get_legend_handles_labels()
+        handles.append(panic_patch)
+        ax.legend(handles=handles, fontsize=8)
+
+    # ── Panel C: Default Fund Balance ───────────────────────────────────
+    ax = axes[1, 0]
+    ax.plot(steps, ccp_fund, color="goldenrod", lw=2)
+    ax.fill_between(steps, ccp_fund, alpha=0.15, color="goldenrod")
+    ax.set_title("CCP Default Fund Balance")
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel("Fund ($)")
+    ax.grid(True, alpha=0.3)
+
+    # ── Panel D: Fire-Sale Volume ───────────────────────────────────────
+    ax = axes[1, 1]
+    ax.bar(steps, ccp_fire, color="firebrick", alpha=0.7, width=0.8)
+    ax.set_title("Fire-Sale Volume Observed by CCP")
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel("Volume")
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle("CCP Agent Dashboard — Game-Theoretic Metrics",
+                 fontsize=14, fontweight="bold", y=1.01)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)

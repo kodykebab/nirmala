@@ -48,6 +48,7 @@ import agentpy as ap
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Any
+import json
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -531,6 +532,16 @@ class ObservationVector:
     loans_due: list[dict] = field(default_factory=list)
     total_repayment_due: float = 0.0
 
+    # ── intent streams (from Redis public/private channels) ─────────
+    # public intents from the previous tick (visible to ALL banks)
+    public_intents: list[dict] = field(default_factory=list)
+    # private intents directed at THIS bank (consumed on read)
+    private_intents: list[dict] = field(default_factory=list)
+    # derived signals from stream data
+    observed_fire_sales: int = 0          # count of fire-sale intents seen
+    observed_defaults: int = 0            # count of default declarations seen
+    observed_sell_volume: float = 0.0     # total sell volume in public stream
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # BankAgent
@@ -614,6 +625,12 @@ class BankAgent(ap.Agent):
         # ── bank-index (graph node id), set by model after placement ────
         self.bank_index: int = -1
 
+        # ── cumulative stream counters (for observability / debugging) ──
+        self.total_public_intents_seen: int = 0
+        self.total_private_intents_seen: int = 0
+        self.total_fire_sales_seen: int = 0
+        self.total_defaults_seen: int = 0
+
     def init_neighbor_data(self):
         """Called by the model AFTER all agents are placed on the network."""
         for nbr in self.model.network.neighbors(self):
@@ -636,6 +653,12 @@ class BankAgent(ap.Agent):
         # 2 ─ Extract observation vector
         obs = self._extract_observation(snapshot, tick)
         self.last_observation = obs
+
+        # 2b ─ Accumulate stream counters (for observability)
+        self.total_public_intents_seen += len(obs.public_intents)
+        self.total_private_intents_seen += len(obs.private_intents)
+        self.total_fire_sales_seen += obs.observed_fire_sales
+        self.total_defaults_seen += obs.observed_defaults
 
         # 3 ─ Update Bayesian beliefs  (PRIVATE — CCP cannot see this)
         self._update_beliefs(obs)
@@ -668,13 +691,27 @@ class BankAgent(ap.Agent):
 
     # ═════════════════════════════════════════════ 0. INCOMING EVENTS
     def _process_incoming_events(self) -> None:
-        """Read pending margin calls and market data from Redis."""
+        """
+        Read pending margin calls, public stream, and private stream
+        from Redis.  Mirrors the central/redis_client.py channel layout:
+          - public_intents        → stream:public:{tick}  (broadcast)
+          - private_intents:{id}  → stream:private:{id}   (targeted)
+        """
         redis = self.model.redis
+        agent_id = f"bank_{self.bank_index:02d}"
 
         # ── margin calls from CCP (issue_margin_call schema) ────────────
         calls = redis.get_pending_margin_calls(self.bank_index)
         for call in calls:
             self.pending_margin_calls.append(call)
+
+        # ── public intent stream (previous tick's broadcast intents) ────
+        # Banks see last tick's public intents (current tick is in-flight)
+        prev_tick = max(0, self.model.t - 1)
+        self._public_intents_received = redis.read_public_stream(prev_tick)
+
+        # ── private intent stream (intents addressed to THIS bank) ──────
+        self._private_intents_received = redis.read_private_stream(agent_id)
 
         # Market data is global — read in _extract_observation.
 
@@ -738,6 +775,27 @@ class BankAgent(ap.Agent):
             for loan in obs.loans_due
         )
 
+        # ── intent streams (public broadcast + private targeted) ────────
+        pub = getattr(self, '_public_intents_received', [])
+        priv = getattr(self, '_private_intents_received', [])
+        obs.public_intents = pub
+        obs.private_intents = priv
+
+        # derive aggregate signals from the public stream
+        for intent in pub:
+            atype = intent.get("action_type", "")
+            if atype == "FIRE_SALE_ASSET":
+                obs.observed_fire_sales += 1
+                obs.observed_sell_volume += (
+                    intent.get("payload", {}).get("quantity", 0)
+                )
+            elif atype == "sell_asset_standard":
+                obs.observed_sell_volume += (
+                    intent.get("payload", {}).get("amount", 0)
+                )
+            elif atype == "DECLARE_DEFAULT":
+                obs.observed_defaults += 1
+
         return obs
 
     # ═════════════════════════════════════════════ 3. UPDATE BELIEFS
@@ -749,6 +807,12 @@ class BankAgent(ap.Agent):
         B. Network liquidity stress   — Gaussian (unknown mean)
         C. Expected margin call size  — Gaussian (unknown mean)
         D. Market volatility          — Gaussian (unknown mean)
+
+        Stream signals (from public/private intents) are folded in:
+          - Public fire-sales / sell orders → increase volatility belief
+          - Public defaults → bump counterparty-risk beliefs upward
+          - Public sell volume → increase liquidity-stress belief
+          - Private margin calls already handled via margin_call channel
         """
         # ── A. counterparty default risk ────────────────────────────────
         for nbr_id, nbr_state in obs.neighbor_states.items():
@@ -768,10 +832,25 @@ class BankAgent(ap.Agent):
 
             self._default_beliefs[nbr_id].update(signal)
 
+        # A+ — if defaults were observed in the public stream, nudge ALL
+        #      counterparty beliefs upward (contagion fear)
+        if obs.observed_defaults > 0:
+            contagion_signal = min(0.3, 0.15 * obs.observed_defaults)
+            for belief in self._default_beliefs.values():
+                belief.update(contagion_signal)
+
         # ── B. network liquidity stress ─────────────────────────────────
         n = max(obs.system_n_banks, 1)
         stress_frac = obs.system_n_stressed / n
         self._liquidity_stress_belief.update(stress_frac, obs_precision=2.0)
+
+        # B+ — heavy public sell volume signals market-wide stress
+        if obs.observed_sell_volume > 0:
+            depth = self.model.p.get("market_depth", 200.0)
+            sell_stress = min(1.0, obs.observed_sell_volume / depth)
+            self._liquidity_stress_belief.update(
+                sell_stress, obs_precision=1.5,
+            )
 
         # ── C. expected margin call ─────────────────────────────────────
         estimated_call = obs.own_total_exposure * obs.system_margin_rate
@@ -782,6 +861,17 @@ class BankAgent(ap.Agent):
 
         # ── D. market volatility ────────────────────────────────────────
         self._volatility_belief.update(obs.market_volatility, obs_precision=2.0)
+
+        # D+ — fire-sale activity in the public stream implies higher
+        #      realised volatility (price impact → price moves)
+        if obs.observed_fire_sales > 0:
+            fire_sale_vol_bump = min(
+                0.30, 0.05 * obs.observed_fire_sales,
+            )
+            self._volatility_belief.update(
+                obs.market_volatility + fire_sale_vol_bump,
+                obs_precision=1.5,
+            )
 
     # ═════════════════════════════════════════════ 4. COMPUTE RISK
     def _compute_risk(self, obs: ObservationVector) -> dict[str, float]:
@@ -1161,8 +1251,14 @@ class BankAgent(ap.Agent):
 
     # ═════════════════════════════════════════════ 6. PUBLISH INTENT
     def _publish_intent(self, intent: ActionIntent) -> None:
-        """Publish intent to Redis for CCP rule engine consumption."""
-        self.model.redis.publish_intent(intent.to_dict())
+        """
+        Publish intent to Redis with public/private stream routing.
+        Mirrors the central redis_client.py visibility architecture:
+          PUBLIC  → stream:public:{tick}  (all agents see it)
+          PRIVATE → stream:private:{target}  (only target sees it)
+        Also pushes to the legacy intents:queue for CCP consumption.
+        """
+        self.model.redis.route_intent(intent.to_dict())
 
     # ═════════════════════════════════════════════ 7. EXECUTE INTENT
     def _execute_intent(self, intent: ActionIntent) -> None:
@@ -1172,6 +1268,14 @@ class BankAgent(ap.Agent):
         """
         cost = self.model.p.get("step_operating_cost", 2)
         self.liquidity -= cost
+
+        # ── passive income: interest on capital and liquid bonds ─────────
+        # This gives banks a positive income stream each tick so they don't
+        # bleed out from operating costs alone.
+        interest_on_capital = self.capital * 0.002    # 0.2% per tick
+        interest_on_bonds = self.assets.get("liquid_bond", 0) * 0.001
+        self.liquidity += interest_on_capital + interest_on_bonds
+
         self.missed_payment = False
 
         action = intent.action_type
@@ -1299,7 +1403,11 @@ class BankAgent(ap.Agent):
         ]
 
     def _exec_sell_asset(self, intent: ActionIntent) -> None:
-        """Sell assets on exchange. Converts asset holdings to liquidity."""
+        """Sell assets on exchange with market-impact pricing.
+
+        Uses redis.compute_sale_price() so that successive sellers in
+        the same tick get progressively worse prices.
+        """
         asset_type = intent.payload.get("asset_type", "liquid_bond")
         amount = intent.payload.get("amount", 0)
 
@@ -1309,10 +1417,22 @@ class BankAgent(ap.Agent):
             return
 
         vol = self._volatility_belief.mean
-        haircut = 0.95 - min(0.15, vol * 0.3)  # 80%–95% of face value
-        proceeds = actual_sell * haircut
+        pricing = self.model.redis.compute_sale_price(
+            tick=self.model.t,
+            asset_type=asset_type,
+            amount=actual_sell,
+            base_volatility=vol,
+            is_fire_sale=False,
+        )
+
+        proceeds = actual_sell * pricing["price_per_unit"]
         self.assets[asset_type] = held - actual_sell
         self.liquidity += proceeds
+
+        # record execution details on intent for audit trail
+        intent.payload["execution_price"] = pricing["price_per_unit"]
+        intent.payload["market_impact"] = pricing["impact_discount"]
+        intent.payload["cumulative_volume"] = pricing["cumulative_volume"]
 
     # ═════════════════════════════════════════════════════════════════════
     # EXECUTION SUB-ROUTINES — Batch 2
@@ -1411,26 +1531,35 @@ class BankAgent(ap.Agent):
     def _exec_fire_sale_asset(self, intent: ActionIntent) -> None:
         """
         FIRE_SALE_ASSET — sell assets at a deep discount (distressed).
-        Worse pricing than sell_asset_standard; can sell illiquid assets.
+        Uses market-impact pricing with is_fire_sale=True → worse
+        execution than sell_asset_standard and compounds sell pressure.
         """
         p = intent.payload
         asset_id = p.get("asset_id", "liquid_bond")
         quantity = p.get("quantity", 0)
-        max_disc = p.get("max_acceptable_discount", 0.20)
 
         held = self.assets.get(asset_id, 0)
         actual_sell = min(quantity, held)
         if actual_sell <= 0:
             return
 
-        # fire-sale pricing: base discount from volatility + fire-sale penalty
         vol = self._volatility_belief.mean
-        discount = min(max_disc, 0.10 + vol * 0.4)
-        price_factor = 1.0 - discount              # e.g. 0.60–0.90
-        proceeds = actual_sell * max(price_factor, 0.50)
+        pricing = self.model.redis.compute_sale_price(
+            tick=self.model.t,
+            asset_type=asset_id,
+            amount=actual_sell,
+            base_volatility=vol,
+            is_fire_sale=True,
+        )
 
+        proceeds = actual_sell * pricing["price_per_unit"]
         self.assets[asset_id] = held - actual_sell
         self.liquidity += proceeds
+
+        # record execution details on intent for audit trail
+        intent.payload["execution_price"] = pricing["price_per_unit"]
+        intent.payload["market_impact"] = pricing["impact_discount"]
+        intent.payload["cumulative_volume"] = pricing["cumulative_volume"]
 
     def _exec_declare_default(self, intent: ActionIntent) -> None:
         """
@@ -1538,9 +1667,9 @@ class BankAgent(ap.Agent):
         for nbr_id, exp in self.exposure_to_neighbors.items():
             nbr = agent_map.get(nbr_id)
             if nbr is not None and not nbr.defaulted:
-                loss = exp * 0.6
+                loss = exp * 0.3           # was 0.6 — LGD reduced to 30%
                 nbr.capital -= loss
-                nbr.liquidity -= loss * 0.3
+                nbr.liquidity -= loss * 0.15   # was 0.3 — less liquidity drain
         self.exposure_to_neighbors.clear()
         self.liquidity = 0
         self.capital = 0

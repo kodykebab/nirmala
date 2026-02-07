@@ -387,7 +387,7 @@ class CCPAgent:
                 continue
             exposure = bank.exposure_to_neighbors.get(defaulting_bank.id, 0)
             if exposure > 0:
-                loss = exposure * 0.6  # LGD = 60%
+                loss = exposure * 0.3  # LGD = 30% (was 60%)
                 total_uncovered += loss
 
         # Step 1: Absorb from default fund
@@ -408,8 +408,8 @@ class CCPAgent:
             if survivors:
                 per_bank_share = remaining_loss / len(survivors)
                 for bank in survivors:
-                    bank.capital -= per_bank_share * 0.5
-                    bank.liquidity -= per_bank_share * 0.5
+                    bank.capital -= per_bank_share * 0.3    # was 0.5
+                    bank.liquidity -= per_bank_share * 0.3  # was 0.5
 
     def accept_default_fund_deposit(self, amount: float) -> None:
         """
