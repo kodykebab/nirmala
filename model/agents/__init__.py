@@ -1,6 +1,6 @@
-"""agents package — exports BankAgent and CCPAgent."""
+"""agents package — exports BankAgent, RedisStateManager, and intent helpers."""
 
-from .BankAgent import BankAgent
-from .CCPAgent import CCPAgent
+from .BankAgent import BankAgent, ActionIntent, IntentFactory
+from .redis_state import RedisStateManager
 
-__all__ = ["BankAgent", "CCPAgent"]
+__all__ = ["BankAgent", "ActionIntent", "IntentFactory", "RedisStateManager"]
