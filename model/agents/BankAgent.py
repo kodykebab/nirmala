@@ -1440,8 +1440,8 @@ class BankAgent(ap.Agent):
 
     def _exec_deposit_default_fund(self, intent: ActionIntent) -> None:
         """
-        DEPOSIT_DEFAULT_FUND — contribute liquidity to the systemic
-        default fund (held by CCP in a full implementation).
+        DEPOSIT_DEFAULT_FUND — contribute liquidity to the CCP's
+        centralised default fund.
         """
         amount = intent.payload.get("amount", 0)
         if amount <= 0:
@@ -1449,6 +1449,9 @@ class BankAgent(ap.Agent):
         actual = min(amount, self.liquidity * 0.5)
         self.liquidity -= actual
         self.default_fund_contribution += actual
+        # Route deposit to CCP's centralised fund
+        if hasattr(self.model, 'ccp'):
+            self.model.ccp.accept_default_fund_deposit(actual)
 
     # ═════════════════════════════════════════════════════════════════════
     # LOAN LIFECYCLE
@@ -1520,9 +1523,17 @@ class BankAgent(ap.Agent):
     # ═════════════════════════════════════════════════════════════════════
 
     def _default(self) -> None:
-        """Mark as defaulted and propagate contagion losses."""
+        """Mark as defaulted and propagate contagion losses via CCP."""
         self.defaulted = True
         self.stressed = True
+
+        # Let the CCP handle the default waterfall:
+        #   1. Default fund absorbs what it can
+        #   2. Remaining loss mutualised across ALL surviving banks
+        if hasattr(self.model, 'ccp'):
+            self.model.ccp.handle_bank_default(self)
+
+        # Direct bilateral contagion to neighbors (exposure-based)
         agent_map = {a.id: a for a in self.model.banks}
         for nbr_id, exp in self.exposure_to_neighbors.items():
             nbr = agent_map.get(nbr_id)

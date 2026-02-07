@@ -2,18 +2,24 @@
 FinancialNetworkModel — AgentPy model for autonomous Bayesian bank agents.
 
 Architecture:
-    Redis (fakeredis) ←→ BankAgents ←→ NetworkX graph
+    Redis (fakeredis) ←→ CCPAgent ←→ BankAgents ←→ NetworkX graph
 
 Each timestep the model:
     1. Publishes the current system state to Redis
     2. Publishes market data (simulated exchange feed — update_market_data)
-    3. Issues margin calls when warranted (simulated CCP — issue_margin_call)
+    3. CCP agent: observe → update margin rate → panic check →
+       compute risk scores → issue margin calls → publish → utility
     4. Each bank pulls snapshot + events, updates beliefs, emits an intent
-    5. Banks self-execute intents (CCP rule engine is external / future)
-    6. Model records systemic metrics + per-bank belief snapshots
+    5. Banks self-execute intents (CCP validates via default waterfall)
+    6. Model records systemic metrics + per-bank belief snapshots + CCP metrics
 
-There is NO CCP agent in this codebase.  Market data and margin calls are
-simulated by the model as external events until the CCP module is built.
+CCP Agent (game-theoretic):
+    - Utility:  w1*(1-Panic) + w2*(Fund/SafeLimit) - w3*Defaults - w4*FireSales
+    - Dynamic margin rate: base_margin + volatility * sensitivity
+    - Panic mode: Total_Exposure > Default_Fund * safe_multiplier
+    - Default waterfall: Fund absorbs losses → remainder mutualised
+    - Private info: Total_Exposure, Member_Risk_Score (banks can't see)
+    - Public info: Current_Margin_Rate (banks see this via Redis)
 """
 
 import agentpy as ap
@@ -21,6 +27,7 @@ import networkx as nx
 import numpy as np
 
 from agents.BankAgent import BankAgent, IntentFactory
+from agents.CCPAgent import CCPAgent
 from agents.redis_state import RedisStateManager
 
 # All possible bank action types
@@ -93,6 +100,9 @@ class FinancialNetworkModel(ap.Model):
         # ── Redis state layer ────────────────────────────────────────────
         self.redis = RedisStateManager(use_fake=True)
 
+        # ── CCP agent (game-theoretic strategic actor) ───────────────────
+        self.ccp = CCPAgent(model=self, params=dict(self.p))
+
         # ── market state (simulated exchange) ────────────────────────────
         self._current_volatility = self.p.get("base_volatility", 0.20)
         self._price_signal = 0.0
@@ -123,8 +133,9 @@ class FinancialNetworkModel(ap.Model):
         # 2. Publish market data (simulated exchange — update_market_data)
         self._publish_market_data()
 
-        # 3. Issue margin calls (simulated CCP — issue_margin_call)
-        n_calls = self._issue_margin_calls()
+        # 3. CCP agent: observe → update margin rate → panic check →
+        #    compute risk scores → issue margin calls → publish → utility
+        n_calls = self.ccp.step(tick=self.t)
 
         # 4. Banks pull snapshot + events → update beliefs → emit & execute
         self.banks.step()
@@ -149,7 +160,7 @@ class FinancialNetworkModel(ap.Model):
             "aggregate_exp": agg_exp,
             "n_stressed": n_stressed,
             "n_defaulted": n_defaulted,
-            "margin_rate": self.p.get("margin_rate", 0.10),
+            "margin_rate": self.ccp.current_margin_rate,
         })
 
         for bank in self.banks:
@@ -198,37 +209,8 @@ class FinancialNetworkModel(ap.Model):
         self.redis.publish_market_data(market_intent.payload)
 
     # ─────────────────────────────────────────── margin calls
-    def _issue_margin_calls(self) -> int:
-        """
-        Simulate CCP issuing margin calls (issue_margin_call schema) to
-        banks whose exposure-to-capital ratio exceeds a threshold.
-        """
-        threshold = self.p.get("margin_call_threshold", 0.5)
-        margin_rate = self.p.get("margin_rate", 0.10)
-        n_issued = 0
-
-        for bank in self.banks:
-            if bank.defaulted:
-                continue
-            total_exp = sum(bank.exposure_to_neighbors.values())
-            ratio = total_exp / max(bank.capital, 1)
-
-            if ratio > threshold:
-                margin_amount = total_exp * margin_rate
-                call = IntentFactory.issue_margin_call(
-                    tick=self.t,
-                    agent_id="ccp_01",
-                    target_agent_id=f"bank_{bank.bank_index:02d}",
-                    margin_amount=round(margin_amount, 2),
-                    deadline_tick=self.t + 2,
-                    reason="exposure_ratio_breach",
-                )
-                self.redis.publish_margin_call(
-                    bank.bank_index, call.to_dict()
-                )
-                n_issued += 1
-
-        return n_issued
+    # Margin calls are now issued by self.ccp (CCPAgent) in its step().
+    # The old _issue_margin_calls() method has been removed.
 
     # ─────────────────────────────────────────── shock
     def _apply_shock(self):
@@ -296,12 +278,14 @@ class FinancialNetworkModel(ap.Model):
         self._ts_actions.append(action_counts)
         self._ts_margin_calls_issued.append(n_margin_calls)
 
-        # default-fund & interbank-loan totals
-        total_dfund = sum(b.default_fund_contribution for b in live)
+        # default-fund: CCP centralised fund + per-bank contributions
+        total_dfund_banks = sum(b.default_fund_contribution for b in live)
         total_ib_loans = sum(
             len(b.interbank_loans_given) for b in live
         )
-        self._ts_default_fund.append(total_dfund)
+        self._ts_default_fund.append(
+            self.ccp.default_fund + total_dfund_banks
+        )
         self._ts_interbank_loans.append(total_ib_loans)
 
         self.record("n_defaulted", n_defaulted)
@@ -319,7 +303,7 @@ class FinancialNetworkModel(ap.Model):
     # ─────────────────────────────────────────── accessors
     @property
     def metrics(self) -> dict:
-        return {
+        base = {
             "defaults": list(self._ts_defaults),
             "active": list(self._ts_active),
             "liquidity": list(self._ts_liquidity),
@@ -334,3 +318,6 @@ class FinancialNetworkModel(ap.Model):
             "default_fund": list(self._ts_default_fund),
             "interbank_loans": list(self._ts_interbank_loans),
         }
+        # Merge CCP agent metrics
+        base.update(self.ccp.metrics)
+        return base
