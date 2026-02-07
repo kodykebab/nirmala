@@ -52,6 +52,16 @@ def main():
         "margin_call_threshold": 0.5,
         "default_fund_rate": 0.05,   # fraction of liq deposited per DEPOSIT_DEFAULT_FUND
 
+        # CCP agent params (game-theoretic)
+        "ccp_initial_default_fund": 100.0,   # starting centralised fund
+        "ccp_base_margin": 0.05,             # base margin rate
+        "ccp_margin_sensitivity": 0.01,      # volatility * this added to margin
+        "ccp_safe_multiplier": 10.0,         # panic when exposure > fund * this
+        "ccp_w1": 0.4,                       # utility weight: stability
+        "ccp_w2": 0.3,                       # utility weight: fund preservation
+        "ccp_w3": 0.2,                       # utility weight: cascade prevention
+        "ccp_w4": 0.1,                       # utility weight: market stress
+
         # market params (simulated exchange)
         "base_volatility": 0.20,
         "vol_shock_step": 15,          # volatility spike at step 15
@@ -88,6 +98,13 @@ def main():
     print(f"  Total margin calls   : {total_mc}")
     print(f"  Default fund total   : {m['default_fund'][-1]:.1f}")
     print(f"  Active IB loans      : {m['interbank_loans'][-1]}")
+
+    # CCP metrics
+    print(f"  CCP final utility    : {m['ccp_utility'][-1]:.4f}")
+    print(f"  CCP final margin rate: {m['ccp_margin_rate'][-1]:.4f}")
+    print(f"  CCP panic mode ticks : {sum(m['ccp_panic_mode'])}")
+    print(f"  CCP default fund     : {m['ccp_default_fund'][-1]:.1f}")
+    print(f"  CCP fire-sale volume : {m['ccp_fire_sale_volume'][-1]:.1f}")
     print("=" * 70 + "\n")
 
     # ── per-bank detail ──────────────────────────────────────────────────
