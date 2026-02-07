@@ -3,3 +3,6 @@ uvicorn
 redis 
 pydantic
 networkx
+neo4j
+neo4j
+python-dotenv

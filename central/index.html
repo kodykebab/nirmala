@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Financial Network Live View</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style type="text/css">
+        body {
+            font-family: sans-serif;
+        }
+
+        #mynetwork {
+            width: 100%;
+            height: 800px;
+            border: 1px solid lightgray;
+            background-color: #f9f9f9;
+        }
+
+        #stats {
+            margin: 10px;
+            padding: 10px;
+            background: #eee;
+            border-bottom: 2px solid #ddd;
+        }
+
+        #debug {
+            color: red;
+            font-family: monospace;
+            white-space: pre-wrap;
+            margin: 10px;
+            border: 1px solid red;
+            padding: 10px;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="stats">Initializing...</div>
+    <div id="debug"></div>
+    <div id="mynetwork"></div>
+
+    <script type="text/javascript">
+        function log(msg) {
+            console.log(msg);
+            // document.getElementById('debug').style.display = 'block';
+            // document.getElementById('debug').innerText += msg + "\n";
+        }
+        function err(msg) {
+            console.error(msg);
+            document.getElementById('debug').style.display = 'block';
+            document.getElementById('debug').innerText += "ERROR: " + msg + "\n";
+        }
+
+        try {
+            if (typeof vis === 'undefined') {
+                throw new Error("Vis.js library not loaded! Check internet connection or CDN.");
+            }
+
+            var network = null;
+            var nodes = new vis.DataSet();
+            var edges = new vis.DataSet();
+
+            // Initialize network
+            var container = document.getElementById('mynetwork');
+            var data = {
+                nodes: nodes,
+                edges: edges
+            };
+            var options = {
+                nodes: {
+                    shape: 'dot',
+                    size: 20,
+                    font: { size: 14, color: '#000' },
+                    borderWidth: 2
+                },
+                edges: {
+                    arrows: 'to',
+                    smooth: { type: 'continuous' },
+                    color: { color: '#848484', highlight: '#848484' }
+                },
+                physics: {
+                    stabilization: false,
+                    barnesHut: {
+                        gravitationalConstant: -2000,
+                        springConstant: 0.04,
+                        springLength: 200
+                    }
+                },
+                interaction: { hover: true }
+            };
+            network = new vis.Network(container, data, options);
+
+            async function updateGraph() {
+                try {
+                    const response = await fetch('/network/graph');
+                    if (!response.ok) throw new Error("Network response was not ok " + response.statusText);
+
+                    const graphData = await response.json();
+
+                    // Debug keys
+                    log("Keys received: " + Object.keys(graphData).join(", "));
+
+                    if (!graphData.nodes) {
+                        throw new Error("Missing 'nodes' key in graph data");
+                    }
+
+                    const links = graphData.links || graphData.edges || [];
+
+                    // --- NODES ---
+                    var newNodes = graphData.nodes.map(node => {
+                        var color = '#97C2FC'; // Default blue
+                        if (node.status === 'defaulted') color = '#FF9999';
+                        if (node.type === 'ccp') color = '#FFFF99';
+                        if (node.type === 'exchange') color = '#99FF99';
+
+                        // Create a multi-line label or tooltip with details
+                        var title = `ID: ${node.id}\nCash: ${Math.round(node.pure_cash || 0)}\nLiab: ${Math.round(node.liabilities || 0)}`;
+
+                        return {
+                            id: node.id,
+                            label: node.label || node.id,
+                            color: color,
+                            title: title // Tooltip
+                        };
+                    });
+                    nodes.update(newNodes);
+
+                    // --- EDGES ---
+                    // To avoid clearing, we construct IDs: source-target-type
+                    var newEdges = links.map(link => {
+                        var id = `${link.source}-${link.target}-${link.type}`;
+                        return {
+                            id: id,
+                            from: link.source,
+                            to: link.target,
+                            label: link.type || '',
+                            title: `Amount: ${link.amount || 0}`,
+                            width: 1 + Math.log(Math.max(1, link.amount || 1)) / 5 // vary width by amount?
+                        };
+                    });
+
+                    // Remove edges that are no longer present?
+                    // For simplicity, just update. If strict sync needed, find diff.
+                    // Let's just update for now (additive). 
+                    // To remove old edges, we'd need to track current IDs.
+                    // Doing edges.clear() is jerky.
+                    // Let's try diffing logic briefly.
+                    var currentEdgeIds = edges.getIds();
+                    var newEdgeIds = new Set(newEdges.map(e => e.id));
+                    var toRemove = currentEdgeIds.filter(id => !newEdgeIds.has(id));
+
+                    if (toRemove.length > 0) edges.remove(toRemove);
+                    edges.update(newEdges);
+
+                } catch (e) {
+                    err("Update failed: " + e.message);
+                }
+
+                // Stats
+                try {
+                    const statsRes = await fetch('/network/stats');
+                    if (statsRes.ok) {
+                        const stats = await statsRes.json();
+                        document.getElementById('stats').innerText =
+                            `Nodes: ${stats.num_nodes} | Edges: ${self.edges.length} | CCP Fund: ${Math.round(stats.ccp_default_fund || 0)}`;
+                    }
+                } catch (e) { /* ignore stats error */ }
+            }
+
+            // Poll every 1 second
+            setInterval(updateGraph, 1000);
+            updateGraph();
+            log("Graph initialized.");
+
+        } catch (e) {
+            err("Initialization failed: " + e.message);
+        }
+    </script>
+</body>
+
+</html>
