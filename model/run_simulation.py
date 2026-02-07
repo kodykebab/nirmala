@@ -30,7 +30,7 @@ def main():
         "n_banks": 10,
         "network_type": "erdos_renyi",
         "er_prob": 0.35,
-        "steps": 40,
+        "steps": 50,
 
         # bank initial state ranges
         "init_liquidity_lo": 50,
@@ -57,7 +57,7 @@ def main():
         "vol_shock_step": 15,          # volatility spike at step 15
 
         # exogenous shock
-        "shock_step": 12,
+        "shock_step": 10,
         "shock_intensity": 0.5,
 
         "seed": 99,
