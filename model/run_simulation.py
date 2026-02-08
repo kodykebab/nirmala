@@ -33,33 +33,33 @@ def main():
     parameters = {
         "n_banks": 10,
         "network_type": "erdos_renyi",
-        "er_prob": 0.35,
+        "er_prob": 0.25,
         "steps": 25000,
 
         # bank initial state ranges
-        "init_liquidity_lo": 80,        # moderate starting runway
-        "init_liquidity_hi": 200,
-        "init_capital_lo": 100,
-        "init_capital_hi": 250,
-        "init_liquid_bond_lo": 40,
-        "init_liquid_bond_hi": 120,
+        "init_liquidity_lo": 150,        # moderate starting runway
+        "init_liquidity_hi": 350,
+        "init_capital_lo": 200,
+        "init_capital_hi": 500,
+        "init_liquid_bond_lo": 80,
+        "init_liquid_bond_hi": 200,
         "init_illiquid_lo": 20,
         "init_illiquid_hi": 60,
 
         # risk / stress params
-        "stress_threshold": 25,
-        "min_liquidity": 15,
-        "step_operating_cost": 0.5,
+        "stress_threshold": 15,
+        "min_liquidity": 8,
+        "step_operating_cost": 0.2,
 
         # CCP params (simulated)
-        "margin_rate": 0.5,
-        "margin_call_threshold": 0.5,
-        "default_fund_rate": 0.02,      # was 0.05 — less upfront drain
+        "margin_rate": 0.4,
+        "margin_call_threshold": 0.7,
+        "default_fund_rate": 0.01,      # was 0.05 — less upfront drain
 
         # CCP agent params (game-theoretic)
-        "ccp_initial_default_fund": 100.0,
-        "ccp_base_margin": 0.05,
-        "ccp_margin_sensitivity": 0.01,
+        "ccp_initial_default_fund": 200.0,
+        "ccp_base_margin": 0.03,
+        "ccp_margin_sensitivity": 0.005,
         "ccp_safe_multiplier": 10.0,
         "ccp_w1": 0.4,
         "ccp_w2": 0.3,
@@ -78,14 +78,14 @@ def main():
         "neo4j_password": os.getenv("NEO4J_PASSWORD", ""),
 
         # market params (simulated exchange)
-        "base_volatility": 0.20,
+        "base_volatility": 0.12,
         "vol_shock_step": 15,
-        "market_depth": 400.0,
+        "market_depth": 750.0,
 
         # exogenous shock
         "shock_step": 100,
-        "shock_intensity": 0.30,         # meaningful shock
-        "shock_fraction": 0.5,           # half the banks hit
+        "shock_intensity": 0.18,         # meaningful shock
+        "shock_fraction": 0.3,           # half the banks hit
 
         "seed": 99,
     }
