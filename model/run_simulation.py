@@ -15,8 +15,7 @@ matching 11 JSON schemas across two batches:
 import os
 
 from dotenv import load_dotenv
-
-load_dotenv()  # loads .env from current dir or parent
+load_dotenv()  # pick up any local .env (Neo4j, etc.)
 
 from model import FinancialNetworkModel
 from visualization import (
@@ -35,7 +34,7 @@ def main():
         "n_banks": 10,
         "network_type": "erdos_renyi",
         "er_prob": 0.35,
-        "steps": 250,
+        "steps": 25000,
 
         # bank initial state ranges
         "init_liquidity_lo": 80,        # moderate starting runway
@@ -67,13 +66,11 @@ def main():
         "ccp_w3": 0.2,
         "ccp_w4": 0.1,
 
-        # Redis connection (cloud RedisLabs — loaded from .env)
+        # Redis connection (local only)
         "redis_use_fake": False,
-        "redis_host": os.getenv("REDIS_HOST", "localhost"),
-        "redis_port": int(os.getenv("REDIS_PORT", "6379")),
+        "redis_host": "localhost",
+        "redis_port": 6379,
         "redis_db": 0,
-        "redis_username": os.getenv("REDIS_USERNAME"),
-        "redis_password": os.getenv("REDIS_PASSWORD"),
 
         # Neo4j Aura (loaded from .env)
         "neo4j_uri": os.getenv("NEO4J_URI", ""),

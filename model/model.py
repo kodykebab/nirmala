@@ -98,36 +98,21 @@ class FinancialNetworkModel(ap.Model):
         for bank in self.banks:
             bank.init_neighbor_data()
 
-        # ── Redis state layer (try cloud → local → fakeredis) ─────────
+        # ── Redis state layer (localhost only, fakeredis fallback) ────
         redis_ok = False
-        redis_host = self.p.get("redis_host", "localhost")
-        redis_port = self.p.get("redis_port", 6379)
         if not self.p.get("redis_use_fake", False):
-            # attempt cloud / specified Redis
             try:
                 self.redis = RedisStateManager(
                     use_fake=False,
-                    host=redis_host,
-                    port=redis_port,
+                    host=self.p.get("redis_host", "localhost"),
+                    port=self.p.get("redis_port", 6379),
                     db=self.p.get("redis_db", 0),
-                    username=self.p.get("redis_username"),
-                    password=self.p.get("redis_password"),
                 )
-                self.redis._r.ping()           # verify connection
+                self.redis._r.ping()
                 redis_ok = True
-                print(f"  ✓ Redis connected: {redis_host}:{redis_port}")
+                print("  ✓ Redis connected: localhost:6379")
             except Exception as e:
-                print(f"  ✗ Cloud Redis failed ({e}), trying localhost...")
-                # fallback to local Redis
-                try:
-                    self.redis = RedisStateManager(
-                        use_fake=False, host="localhost", port=6379, db=0,
-                    )
-                    self.redis._r.ping()
-                    redis_ok = True
-                    print("  ✓ Redis connected: localhost:6379 (fallback)")
-                except Exception as e2:
-                    print(f"  ✗ Local Redis also failed ({e2}), using fakeredis")
+                print(f"  ✗ Local Redis failed ({e}), using fakeredis")
         if not redis_ok:
             self.redis = RedisStateManager(use_fake=True)
             print("  ✓ Using fakeredis (in-memory)")
@@ -245,6 +230,64 @@ class FinancialNetworkModel(ap.Model):
                 "defaulted": int(bank.defaulted),
                 "missed_payment": int(bank.missed_payment),
             })
+
+        # ── CCP payoff components ───────────────────────────────────
+        ccp = self.ccp
+        panic_val = 1.0 if ccp.panic_mode else 0.0
+        fund_ratio = min(ccp.default_fund / max(ccp.safe_limit, 1.0), 1.0)
+        n_def = ccp.num_defaults_this_tick
+        norm_def = n_def / max(len(self.banks), 1)
+        total_liq = sum(b.liquidity for b in self.banks if not b.defaulted)
+        norm_fs = min(ccp.fire_sale_volume / max(total_liq, 1.0), 1.0)
+        self.redis._r.hset("ccp:state", mapping={
+            "utility": str(ccp.utility_history[-1] if ccp.utility_history else 0),
+            "default_fund": str(ccp.default_fund),
+            "margin_rate": str(ccp.current_margin_rate),
+            "panic_mode": str(int(ccp.panic_mode)),
+            "fire_sale_volume": str(ccp.fire_sale_volume),
+            "num_defaults": str(n_def),
+            "comp_stability": str(round(ccp.w1 * (1.0 - panic_val), 4)),
+            "comp_fund": str(round(ccp.w2 * fund_ratio, 4)),
+            "comp_defaults": str(round(ccp.w3 * norm_def, 4)),
+            "comp_firesale": str(round(ccp.w4 * norm_fs, 4)),
+        })
+
+        # ── Network topology (nodes + edges) ─────────────────────────
+        import json as _json
+        nodes = []
+        for b in self.banks:
+            nodes.append({
+                "id": b.bank_index,
+                "type": "bank",
+                "status": "defaulted" if b.defaulted else ("stressed" if b.stressed else "ok"),
+                "liquidity": round(b.liquidity, 1),
+            })
+        nodes.append({
+            "id": "ccp",
+            "type": "ccp",
+            "status": "panic" if ccp.panic_mode else "ok",
+            "default_fund": round(ccp.default_fund, 1),
+        })
+        edges = []
+        for b in self.banks:
+            for nb_id, exp in b.exposure_to_neighbors.items():
+                if exp > 0:
+                    edges.append({
+                        "from": b.bank_index,
+                        "to": nb_id,
+                        "weight": round(exp, 1),
+                        "type": "exposure",
+                    })
+            # CCP <-> bank edge (margin relationship)
+            if not b.defaulted:
+                edges.append({
+                    "from": b.bank_index,
+                    "to": "ccp",
+                    "weight": round(ccp.current_margin_rate * 100, 1),
+                    "type": "margin",
+                })
+        self.redis._r.set("network:topology",
+                          _json.dumps({"nodes": nodes, "edges": edges}))
 
     # ─────────────────────────────────────────── market data
     def _publish_market_data(self):
