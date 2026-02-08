@@ -220,9 +220,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>CCP Payoff Function — Utility Decomposition</h3>
     <canvas id="chartCCPPayoff" height="180"></canvas>
   </div>
-  <div class="chart-card" style="padding: 0; overflow: hidden;">
+  <div class="chart-card" style="padding: 0; overflow: hidden; display:flex; flex-direction:column;">
     <h3 style="padding: 14px 14px 0 14px;">Network Snapshot <span style="font-size:0.65rem;opacity:0.5">(drag • scroll)</span></h3>
-    <div id="networkGraph" style="width:100%; height:220px; background:#0d1117;"></div>
+    <div id="networkGraph" style="width:100%; flex:1; background:#0d1117;"></div>
   </div>
 </div>
 
@@ -505,6 +505,7 @@ const netEdges = new vis.DataSet();
 const netContainer = document.getElementById('networkGraph');
 const netData = { nodes: netNodes, edges: netEdges };
 const netOptions = {
+  autoResize: false,
   physics: {
     enabled: true,
     solver: 'forceAtlas2Based',
