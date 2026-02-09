@@ -6,3 +6,5 @@ networkx
 neo4j
 neo4j
 python-dotenv
+flask
+agentpy
