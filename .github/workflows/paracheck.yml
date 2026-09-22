@@ -1,0 +1,46 @@
+# ParaCheck — parallelism and gas analysis for Solidity.
+#
+# The analysis runs here, on your own runner, so ParaCheck never receives a copy
+# of your source. It authenticates to the ParaCheck API with a GitHub OIDC
+# token, which GitHub mints for this run and signs — there is no secret to
+# create, store or rotate.
+
+name: ParaCheck
+
+on:
+  pull_request:
+    paths:
+      - "**.sol"
+      - "foundry.toml"
+      - "hardhat.config.*"
+  # Lets the Scan now button in the ParaCheck dashboard start a run.
+  workflow_dispatch: {}
+
+# Least privilege: read the code, write the check, prove who we are.
+# `id-token` is what makes the secretless authentication work.
+permissions:
+  contents: read
+  checks: write
+  id-token: write
+
+concurrency:
+  # A newer push supersedes a scan nobody is waiting on any more.
+  group: paracheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Analyze with ParaCheck
+        uses: kodykebab/venus/.github/actions/paracheck@main
+        with:
+          target: "."
+          chain: monad
+          # Set to `high` to fail the check — and block the merge — when a
+          # high-severity finding appears. Empty means report only.
+          fail-on: ""
